@@ -1,3 +1,8 @@
+/*
+	Author		: Nancy Yang / maxbearwiz@gmail.com
+	Date			: 2021-01-24
+	Description : Http get wrapper with rate control
+*/
 package main
 
 import (
@@ -13,6 +18,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 var urlsMutex = sync.RWMutex{}
@@ -91,7 +97,7 @@ func parseUrl(url string) (hostname string) {
 	return
 }
 
-func doGet(req Request, results chan Result, urls map[string]int, hosts map[string]int, hostname string) {
+func doGet(req Request, results chan Result, urls map[string]int, hosts map[string][]Request, hostname string) {
 	result := Result{
 		Idx: req.Idx,
 		Url: req.Url,
@@ -119,36 +125,57 @@ func doGet(req Request, results chan Result, urls map[string]int, hosts map[stri
 		result.OutputFile = fmt.Sprintf("url_%d.html", idx)
 	}
 	hostsMutex.Lock()
-	hosts[hostname] -= 1
+	if len(hosts[hostname]) == 1 {
+		delete(hosts, hostname)
+	} else {
+		for i := 0; i < len(hosts[hostname]); i++ {
+			if hosts[hostname][i] == req {
+				hosts[hostname] = append(hosts[hostname][:i], hosts[hostname][i+1:]...)
+			}
+		}
+	}
 	hostsMutex.Unlock()
+	log.Printf("#### obtained result for %d  %s", result.Idx, result.Url)
 	results <- result
 }
 
 func httpGetter(requests chan Request, results chan Result) {
+	tick := time.Tick(1 * time.Second)
 	urls := make(map[string]int)
-	hosts := make(map[string]int)
-	//backlogs := make(chan Request)
+	hosts := make(map[string][]Request)
+L:
 	for {
 		select {
 		case req, ok := <-requests:
 			if !ok {
-				return
+				break L
 			}
 			hostname := parseUrl(req.Url)
+			hostsMutex.Lock()
 			_, ook := hosts[hostname]
 			if !ook {
-				hosts[hostname] = 0
+				hosts[hostname] = make([]Request, 0)
 			}
-			hosts[hostname] += 1
-			//if hosts[hostname] > 3 {
-			//		continue
-			//		}
-
-			go doGet(req, results, urls, hosts, hostname)
-
-			//		case req, _ := <-backlogs:
-			//			hostname := parseUrl(req.Url)
-			//			go doGet(req, results, urls, hosts, hostname)
+			hosts[hostname] = append(hosts[hostname], req)
+			hostsMutex.Unlock()
+		}
+	}
+	for {
+		if len(hosts) == 0 {
+			return
+		}
+		for hostname, requests := range hosts {
+			log.Printf("### hostname \"%s\" number of urls left to be processed %d", hostname, len(requests))
+			for i := 0; i < len(requests); i++ {
+				go doGet(hosts[hostname][i], results, urls, hosts, hostname)
+				if i == 2 {
+					break
+				}
+			}
+		}
+		select {
+		case <-tick:
+			continue
 		}
 	}
 }
@@ -184,9 +211,7 @@ func main() {
 	cnt := 0
 	for result := range results {
 		cnt += 1
-		if result.Err == nil {
-			log.Printf("%d %s output=> %s", result.Idx, result.Url, result.OutputFile)
-		} else {
+		if result.Err != nil {
 			log.Printf("%d %s error=> %s", result.Idx, result.Url, result.Err)
 		}
 		if len(urls) == cnt {
